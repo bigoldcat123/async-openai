@@ -41,16 +41,16 @@ impl<'c, C: Config> Chat<'c, C> {
     )]
     pub async fn create(
         &self,
-        request: CreateChatCompletionRequest,
+        request: & CreateChatCompletionRequest,
     ) -> Result<CreateChatCompletionResponse, OpenAIError> {
-        #[cfg(not(feature = "byot"))]
-        {
-            if request.stream.is_some() && request.stream.unwrap() {
-                return Err(OpenAIError::InvalidArgument(
-                    "When stream is true, use Chat::create_stream".into(),
-                ));
-            }
-        }
+        // #[cfg(not(feature = "byot"))]
+        // {
+        //     if request.stream.is_some() && request.stream.unwrap() {
+        //         return Err(OpenAIError::InvalidArgument(
+        //             "When stream is true, use Chat::create_stream".into(),
+        //         ));
+        //     }
+        // }
         self.client
             .post("/chat/completions", request, &self.request_options)
             .await
@@ -74,18 +74,18 @@ impl<'c, C: Config> Chat<'c, C> {
     #[allow(unused_mut)]
     pub async fn create_stream(
         &self,
-        mut request: CreateChatCompletionRequest,
+        request: & CreateChatCompletionRequest,
     ) -> Result<ChatCompletionResponseStream, OpenAIError> {
-        #[cfg(not(feature = "byot"))]
-        {
-            if request.stream.is_some() && !request.stream.unwrap() {
-                return Err(OpenAIError::InvalidArgument(
-                    "When stream is false, use Chat::create".into(),
-                ));
-            }
+        // #[cfg(not(feature = "byot"))]
+        // {
+        //     if request.stream.is_some() && !request.stream.unwrap() {
+        //         return Err(OpenAIError::InvalidArgument(
+        //             "When stream is false, use Chat::create".into(),
+        //         ));
+        //     }
 
-            request.stream = Some(true);
-        }
+        //     request.stream = Some(true);
+        // }
         self.client
             .post_stream("/chat/completions", request, &self.request_options)
             .await
