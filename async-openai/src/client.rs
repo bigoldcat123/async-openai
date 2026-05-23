@@ -12,7 +12,7 @@ use crate::error::StreamError;
 use crate::executor::TowerExecutor;
 use crate::{
     config::{Config, OpenAIConfig},
-    error::{map_deserialization_error, ApiError, OpenAIError, WrappedError},
+    error::{map_deserialization_error, ApiError, ApiErrorResponse, OpenAIError, WrappedError},
     executor::{HttpRequestFactory, ReqwestExecutor, SharedExecutor},
     traits::AsyncTryFrom,
     RequestOptions,
@@ -401,9 +401,7 @@ impl<C: Config> Client<C> {
         I: Serialize,
     {
         // JSON bodies are materialized once so the base BYOT path can keep
-        // accepting borrowed inputs. Middleware-enabled BYOT still adds owned
-        // replay bounds in the macro, but the core client does not force those
-        // bounds onto non-middleware users.
+        // accepting borrowed inputs.
         let request = Bytes::from(serde_json::to_vec(&request).map_err(|error| {
             OpenAIError::InvalidArgument(format!("failed to serialize request: {error}"))
         })?);
@@ -634,7 +632,11 @@ impl<C: Config> Client<C> {
         &self,
         request_factory: HttpRequestFactory,
     ) -> Result<Response, OpenAIError> {
-        self.executor.execute(request_factory).await
+        let response = self.executor.execute(request_factory).await?;
+        if !response.status().is_success() {
+            return Err(read_error_response(response).await);
+        }
+        Ok(response)
     }
 
     async fn execute_stream<O>(
@@ -726,31 +728,41 @@ impl<C: Config> Client<C> {
 }
 
 async fn read_response(response: Response) -> Result<(Bytes, HeaderMap), OpenAIError> {
-    let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.bytes().await.map_err(OpenAIError::Reqwest)?;
+    Ok((bytes, headers))
+}
+
+async fn read_error_response(response: Response) -> OpenAIError {
+    let status = response.status();
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => return OpenAIError::Reqwest(e),
+    };
 
     if status.is_server_error() {
         // OpenAI does not guarantee server errors are returned as JSON so we cannot deserialize them.
         let message: String = String::from_utf8_lossy(&bytes).into_owned();
         tracing::warn!("Server error: {status} - {message}");
-        return Err(OpenAIError::ApiError(ApiError {
-            message,
-            r#type: None,
-            param: None,
-            code: None,
-        }));
+        return OpenAIError::ApiError(ApiErrorResponse {
+            status_code: status,
+            api_error: ApiError {
+                message,
+                r#type: None,
+                param: None,
+                code: None,
+            },
+        });
     }
 
-    // Deserialize response body from either error object or actual response object
-    if !status.is_success() {
-        let wrapped_error: WrappedError = serde_json::from_slice(bytes.as_ref())
-            .map_err(|e| map_deserialization_error(e, bytes.as_ref()))?;
-
-        return Err(OpenAIError::ApiError(wrapped_error.error));
+    // Deserialize response body from the error object
+    match serde_json::from_slice::<WrappedError>(bytes.as_ref()) {
+        Ok(wrapped) => OpenAIError::ApiError(ApiErrorResponse {
+            status_code: status,
+            api_error: wrapped.error,
+        }),
+        Err(e) => map_deserialization_error(e, bytes.as_ref()),
     }
-
-    Ok((bytes, headers))
 }
 
 /// Request which responds with SSE.
@@ -774,29 +786,14 @@ pub(crate) async fn stream_mapped_raw_events<O>(
 where
     O: DeserializeOwned + 'static,
 {
-    if !response.status().is_success() {
-        return Box::pin(futures::stream::once(async move {
-            match read_response(response).await {
-                Ok(_) => Err(OpenAIError::InvalidArgument(
-                    "stream request failed without an error body".into(),
-                )),
-                Err(error) => Err(error),
-            }
-        }));
-    }
-
     let byte_stream = response
         .bytes_stream()
         .map(|result| result.map_err(std::io::Error::other));
     let event_stream = Box::pin(eventsource_stream::EventStream::new(byte_stream));
 
     Box::pin(futures::stream::unfold(
-        (event_stream, event_mapper, false),
-        |(mut event_stream, event_mapper, finished)| async move {
-            if finished {
-                return None;
-            }
-
+        (event_stream, event_mapper),
+        |(mut event_stream, event_mapper)| async move {
             loop {
                 let event = match event_stream.next().await {
                     Some(Ok(event)) => event,
@@ -805,20 +802,22 @@ where
                             Err(OpenAIError::StreamError(Box::new(
                                 StreamError::EventStream(error.to_string()),
                             ))),
-                            (event_stream, event_mapper, true),
+                            (event_stream, event_mapper),
                         ));
                     }
                     None => return None,
                 };
 
-                let done = event.data == "[DONE]";
+                if event.data == "[DONE]" {
+                    return None;
+                }
 
                 if event.event == "keepalive" {
                     continue;
                 }
 
                 let response = event_mapper(event);
-                return Some((response, (event_stream, event_mapper, done)));
+                return Some((response, (event_stream, event_mapper)));
             }
         },
     ))
@@ -835,12 +834,6 @@ where
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        if !response.status().is_success() {
-            if let Err(e) = read_response(response).await {
-                let _ = tx.send(Err(e));
-            }
-            return;
-        }
         let byte_stream = response
             .bytes_stream()
             .map(|r| r.map_err(std::io::Error::other));
@@ -856,7 +849,9 @@ where
                     break;
                 }
             };
-            let done = event.data == "[DONE]";
+            if event.data == "[DONE]" {
+                break;
+            }
 
             if event.event == "keepalive" {
                 continue;
@@ -865,10 +860,6 @@ where
             let response = event_mapper(event);
 
             if tx.send(response).is_err() {
-                break;
-            }
-
-            if done {
                 break;
             }
         }

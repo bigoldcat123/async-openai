@@ -703,7 +703,8 @@ pub struct InputTextContent {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct InputImageContent {
     /// The detail level of the image to be sent to the model. One of `high`, `low`, or `auto`.
-    /// Defaults to `auto`.
+    /// Defaults to `auto` when omitted in JSON input.
+    #[serde(default)]
     pub detail: ImageDetail,
     /// The ID of the file to be sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1138,6 +1139,7 @@ pub struct ResponseTextParam {
     /// Setting to `{ "type": "json_object" }` enables the older JSON mode, which
     /// ensures the message the model generates is valid JSON. Using `json_schema`
     /// is preferred for models that support it.
+    #[serde(default)]
     pub format: TextResponseFormatConfiguration,
 
     /// Constrains the verbosity of the model's response. Lower values will result in
@@ -1148,10 +1150,11 @@ pub struct ResponseTextParam {
     pub verbosity: Option<Verbosity>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TextResponseFormatConfiguration {
     /// Default response format. Used to generate text responses.
+    #[default]
     Text,
     /// JSON object response format. An older method of generating JSON responses.
     /// Using `json_schema` is recommended for models that support it.
@@ -2033,7 +2036,12 @@ pub enum WebSearchToolCallAction {
 pub struct WebSearchToolCall {
     /// An object describing the specific action taken in this web search call. Includes
     /// details on how the model used the web (search, open_page, find, find_in_page).
-    pub action: WebSearchToolCallAction,
+    ///
+    /// This is optional because `response.output_item.added` events can include
+    /// in-progress web search calls before OpenAI has populated the action.
+    /// See <https://github.com/64bit/async-openai/issues/548>.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<WebSearchToolCallAction>,
     /// The unique ID of the web search tool call.
     pub id: String,
     /// The status of the web search tool call.
