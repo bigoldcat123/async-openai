@@ -333,8 +333,8 @@ pub struct ChatCompletionRequestAssistantMessage {
     #[deprecated]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_call: Option<FunctionCall>,
-    #[serde(flatten)]
-    pub extra: Value,
+    #[serde(flatten,skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Value>,
 }
 
 /// Tool message
